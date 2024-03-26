@@ -1,50 +1,100 @@
 import streamlit as st
-import numpy as np
 import pandas as pd
 import altair as alt
-
-# Page title
-st.set_page_config(page_title='Interactive Data Explorer', page_icon='📊')
-st.title('📊 Interactive Data Explorer')
-
-with st.expander('About this app'):
-  st.markdown('**What can this app do?**')
-  st.info('This app shows the use of Pandas for data wrangling, Altair for chart creation and editable dataframe for data interaction.')
-  st.markdown('**How to use the app?**')
-  st.warning('To engage with the app, 1. Select genres of your interest in the drop-down selection box and then 2. Select the year duration from the slider widget. As a result, this should generate an updated editable DataFrame and line plot.')
-  
-st.subheader('Which Movie Genre performs ($) best at the box office?')
-
-# Load data
-df = pd.read_csv('data/movies_genres_summary.csv')
-df.year = df.year.astype('int')
-
-# Input widgets
-## Genres selection
-genres_list = df.genre.unique()
-genres_selection = st.multiselect('Select genres', genres_list, ['Action', 'Adventure', 'Biography', 'Comedy', 'Drama', 'Horror'])
-
-## Year selection
-year_list = df.year.unique()
-year_selection = st.slider('Select year duration', 1986, 2006, (2000, 2016))
-year_selection_list = list(np.arange(year_selection[0], year_selection[1]+1))
-
-df_selection = df[df.genre.isin(genres_selection) & df['year'].isin(year_selection_list)]
-reshaped_df = df_selection.pivot_table(index='year', columns='genre', values='gross', aggfunc='sum', fill_value=0)
-reshaped_df = reshaped_df.sort_values(by='year', ascending=False)
+import ccxt
+from datetime import datetime, timedelta
 
 
-# Display DataFrame
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_all_funding_rate(exchange_name: str) -> dict:
+    exchange = getattr(ccxt, exchange_name)()
+    markets = exchange.load_markets()
+    funding_rates = {}
+    for symbol, market in markets.items():
+        if market.get("linear"):  # 線形契約に限定
+            try:
+                funding_rate = exchange.fetch_funding_rate(
+                    symbol)["fundingRate"] * 100  # パーセンテージに変換
+                funding_rates[symbol] = funding_rate
+            except ccxt.ExchangeError:
+                continue  # エラーハンドリングを考慮
+    return funding_rates
 
-df_editor = st.data_editor(reshaped_df, height=212, use_container_width=True,
-                            column_config={"year": st.column_config.TextColumn("Year")},
-                            num_rows="dynamic")
-df_chart = pd.melt(df_editor.reset_index(), id_vars='year', var_name='genre', value_name='gross')
 
-# Display chart
-chart = alt.Chart(df_chart).mark_line().encode(
-            x=alt.X('year:N', title='Year'),
-            y=alt.Y('gross:Q', title='Gross earnings ($)'),
-            color='genre:N'
-            ).properties(height=320)
-st.altair_chart(chart, use_container_width=True)
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_funding_rate_history(exchange_name: str, symbol: str) -> pd.DataFrame:
+    exchange = getattr(ccxt, exchange_name)()
+    history = exchange.fetch_funding_rate_history(symbol)
+    timestamps = [datetime.fromtimestamp(
+        item['timestamp'] / 1000) for item in history]
+    rates = [item['fundingRate'] * 100 for item in history]  # パーセンテージに変換
+    return pd.DataFrame({'Date': timestamps, 'Funding Rate': rates})
+
+
+def display_funding_rates(exchange_name, top_n):
+    with st.spinner('Fetching funding rates...'):
+        rates = fetch_all_funding_rate(exchange_name)
+    # rates = fetch_all_funding_rate(exchange_name)
+    rates_sorted = sorted(
+        rates.items(), key=lambda x: x[1], reverse=True)[:top_n]
+    symbols, rates = zip(*rates_sorted)
+
+    df = pd.DataFrame({'Symbol': symbols, 'Funding Rate': rates})
+    chart = alt.Chart(df).mark_bar().encode(
+        x=alt.X('Symbol:N', sort='-y'),
+        y='Funding Rate:Q',
+        tooltip=['Symbol', 'Funding Rate']
+    ).properties(width=800, height=400, title=f"Top {top_n} Funding Rates [%]")
+
+    st.altair_chart(chart, use_container_width=True)
+
+
+def display_funding_rate_history(exchange_name, symbol, start_date):
+    df = fetch_funding_rate_history(exchange_name, symbol)
+    if not df.empty:
+        start_datetime = pd.to_datetime(start_date)
+        # 指定された日付より後のデータのみフィルタリング
+        df_filtered = df[df['Date'] > start_datetime]
+
+        chart = alt.Chart(df_filtered).mark_line().encode(
+            x='Date:T',
+            y=alt.Y('Funding Rate:Q', axis=alt.Axis(title='Funding Rate [%]')),
+            tooltip=['Date:T', 'Funding Rate:Q']
+        ).properties(width=800, height=400, title=f'Funding Rate History for {symbol}').interactive()
+
+        st.altair_chart(chart, use_container_width=True)
+    else:
+        st.write(f"No data available for {symbol}.")
+
+
+def main():
+    st.title("Funding Rate Dashboard")
+    exchange_options = [('MEXC', 'mexc'),
+                        ('OKX', 'okx'), ('Binance', 'binance'), ('Bybit (works only in local)', 'bybit'),]
+    selected_exchange = st.sidebar.selectbox(
+        "Select Exchange", options=exchange_options, format_func=lambda x: x[0])
+    # exchange_options = ['bybit', 'mexc', 'okx']
+    # selected_exchange = st.sidebar.selectbox(
+    #     "Select Exchange", exchange_options)
+    top_n = st.sidebar.slider("Select Top N Symbols",
+                              min_value=1, max_value=50, value=20)
+
+    default_start_date = datetime.now().date() - timedelta(days=10)
+    start_date = st.sidebar.date_input("Start Date", value=default_start_date)
+
+    st.header("Funding Rate Overview")
+    display_funding_rates(selected_exchange[1], top_n)
+
+    st.header("Detailed Funding Rate History")
+
+    # 資金調達率が高い順にシンボルを取得
+    rates = fetch_all_funding_rate(selected_exchange[1])
+    rates_sorted = sorted(rates.items(), key=lambda x: x[1], reverse=True)
+    top_symbols = [symbol for symbol, rate in rates_sorted[:top_n]]
+    # ソートされたシンボルのリストを用いて詳細な履歴を表示
+    for symbol in top_symbols:
+        display_funding_rate_history(selected_exchange[1], symbol, start_date)
+
+
+if __name__ == "__main__":
+    main()
