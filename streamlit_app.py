@@ -4,23 +4,6 @@ import altair as alt
 import ccxt
 from datetime import datetime, timedelta
 
-'''
-@st.cache_data(ttl=600, show_spinner=False)
-def fetch_all_funding_rate(exchange_name: str) -> dict:
-    exchange = getattr(ccxt, exchange_name)()
-    markets = exchange.load_markets()
-    funding_rates = {}
-    for symbol, market in markets.items():
-        if market.get("linear"):  # 線形契約に限定
-            try:
-                funding_rate = exchange.fetch_funding_rate(
-                    symbol)["fundingRate"] * 100  # パーセンテージに変換
-                funding_rates[symbol] = funding_rate
-            except ccxt.ExchangeError:
-                continue  # エラーハンドリングを考慮
-    return funding_rates
-'''
-
 
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_all_funding_rate(exchange_name: str) -> dict:
